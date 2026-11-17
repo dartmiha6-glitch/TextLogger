@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Text Logger</string>
+    <string name="service_description">Salvează local textul tastat.</string>
+</resources>
