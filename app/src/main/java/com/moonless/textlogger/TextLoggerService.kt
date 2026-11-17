@@ -35,45 +35,44 @@ class TextLoggerService : AccessibilityService() {
         event ?: return
         if (!prefs.getBoolean(KEY_ENABLED, false)) return
 
-        if (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
-            val pkg = event.packageName?.toString() ?: return
-            if (pkg == packageName) return // Nu ne loga pe noi înșine
-
-            val currentText = extractText(event) ?: return
-            if (currentText.isEmpty() || currentText == lastText) return
-
-            val delta = diffText(lastText, currentText)
-            lastText = currentText
-
-            if (delta.isNotEmpty()) {
-                appendToLog(pkg, delta)
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> handleTextChanged(event)
+            AccessibilityEvent.TYPE_VIEW_FOCUSED, 
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                lastText = "" // Resetăm când schimbăm câmpul
             }
-        } else if (event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED || 
-                   event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            lastText = "" // Resetăm când schimbăm câmpul sau aplicația
         }
     }
 
-    private fun extractText(event: AccessibilityEvent): String? {
-        val source = event.source
-        if (source != null) {
-            try {
-                val text = source.text?.toString()
-                if (!text.isNullOrEmpty()) return text
-            } finally {
-                source.recycle()
-            }
+    private fun handleTextChanged(event: AccessibilityEvent) {
+        val pkg = event.packageName?.toString() ?: return
+        if (pkg == packageName) return // Nu loga propria aplicație
+
+        // PROTECȚIE: Dacă e câmp de parolă, nu salva!
+        val source = event.source ?: return
+        if (source.isPassword) {
+            source.recycle()
+            return
         }
-        val eventText = event.text
-        if (eventText.isNotEmpty()) return eventText.joinToString("")
-        return null
+
+        val currentText = source.text?.toString() ?: ""
+        source.recycle()
+
+        if (currentText.isEmpty() || currentText == lastText) return
+
+        val delta = diffText(lastText, currentText)
+        lastText = currentText
+
+        if (delta.isNotEmpty()) {
+            appendToLog(pkg, delta)
+        }
     }
 
     private fun diffText(old: String, new: String): String {
         if (old.isEmpty()) return new
-        if (new.startsWith(old)) return new.substring(old.length) // S-a adăugat text
-        if (old.startsWith(new)) return "" // S-a șters text (backspace)
-        return new // S-a dat paste sau s-a schimbat tot
+        if (new.startsWith(old)) return new.substring(old.length) // S-a adaugat
+        if (old.startsWith(new)) return "" // S-a sters (backspace)
+        return "\n[Modificat]: $new" // S-a dat paste sau s-a rescris
     }
 
     private fun appendToLog(pkg: String, text: String) {
@@ -81,9 +80,9 @@ class TextLoggerService : AccessibilityService() {
             val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
             val line = "[$timestamp] [$pkg] $text\n"
             
-            // Dacă fișierul e prea mare (peste 2MB), îl salvăm ca backup și începem unul nou
-            if (logFile.exists() && logFile.length() > 2 * 1024 * 1024) {
-                val backup = File(filesDir, "textlog_old_${System.currentTimeMillis()}.txt")
+            // Rotatie log daca depaseste 5MB
+            if (logFile.exists() && logFile.length() > 5 * 1024 * 1024) {
+                val backup = File(filesDir, "textlog_backup_${System.currentTimeMillis()}.txt")
                 logFile.renameTo(backup)
             }
             
